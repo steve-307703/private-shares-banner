@@ -1,0 +1,4 @@
+Name = "Private Shares Banner"
+Version = "0.1.0"
+Authors = ["Steve <steve@307703.xyz>"]
+Description = "Detects users with private shares and bans them."
