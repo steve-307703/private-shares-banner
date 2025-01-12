@@ -72,6 +72,7 @@ class Plugin(BasePlugin):
         for username in chain(self.settings["banned"], self.config.sections["server"]["banlist"]):
             user = self.users[username]
             user.state = UserState.HasPrivateShares
+            user.banned = True
             user.sent_message = True
 
             if not self.core.network_filter.is_user_banned(username):
@@ -160,17 +161,20 @@ class Plugin(BasePlugin):
         self.core.userbrowse.users[username].clear()
 
     def ban_user(self, user, username):
-        if username not in self.settings["banned"]:
-            self.settings["banned"].append(username)
+        if not user.banned:
+            if username not in self.settings["banned"]:
+                self.settings["banned"].append(username)
 
-        if self.core.network_filter.is_user_banned(username):
-            if user.emit_logs:
-                self.log(f"{username}: user is already banned")
-        else:
-            self.core.network_filter.ban_user(username)
+            if self.core.network_filter.is_user_banned(username):
+                if user.emit_logs:
+                    self.log(f"{username}: user is already banned")
+            else:
+                self.core.network_filter.ban_user(username)
 
-            if user.emit_logs:
-                self.log(f"{username}: banned user")
+                if user.emit_logs:
+                    self.log(f"{username}: banned user")
+
+            user.banned = True
 
         aborted_transfers = 0
 
@@ -213,6 +217,7 @@ class User:
     def __init__(self):
         self.state = None
         self.requested_shares = None
+        self.banned = False
         self.sent_message = False
         self.emit_logs = False
 
