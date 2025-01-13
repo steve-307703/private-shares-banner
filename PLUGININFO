@@ -1,4 +1,4 @@
 Name = "Private Shares Banner"
-Version = "0.1.1"
-Authors = ["Steve <steve@307703.xyz>"]
+Version = "0.2.0"
+authors = ["Steve <steve@307703.xyz>"]
 Description = "Detects users with private shares and bans them."

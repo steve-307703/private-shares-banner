@@ -1,9 +1,11 @@
+import json
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from itertools import chain
+from pathlib import Path
 from typing import override
 
+from pynicotine.logfacility import log
 from pynicotine.pluginsystem import BasePlugin
 from pynicotine.transfers import TransferStatus
 from pynicotine.userbrowse import BrowsedUser
@@ -16,6 +18,7 @@ class Plugin(BasePlugin):
 
         self.settings = {
             "verbose": False,
+            "save_shares": False,
             "check_distributed_search": False,
             "send_message": False,
             "open_private_chat": True,
@@ -26,12 +29,15 @@ class Plugin(BasePlugin):
                 " for others to access and enjoy the content. "
                 "Let's keep the spirit of sharing alive by keeping our collections open!"
             ),
-            "banned": [],
         }
 
         self.metasettings = {
             "verbose": {
                 "description": "Verbose logging",
+                "type": "bool",
+            },
+            "save_shares": {
+                "description": "Save banned users shares",
                 "type": "bool",
             },
             "check_distributed_search": {
@@ -53,31 +59,28 @@ class Plugin(BasePlugin):
                 ),
                 "type": "textview",
             },
-            "banned": {
-                "description": "Banned users",
-                "type": "list string",
-            },
         }
 
         self.users = defaultdict(User)
+        self.shares_path = Path(log.debug_folder_path).parent / self.internal_name
+        self.shares_path.mkdir(exist_ok=True)
 
     @override
     def init(self):
+        self.check_message()
         self.users[self.config.sections["server"]["login"]].state = UserState.NoPrivateShares
 
+        for username in self.config.sections["server"]["banlist"]:
+            user = self.users[username]
+            user.state = UserState.HasPrivateShares
+            user.sent_message = True
+
+    def check_message(self):
         if self.settings["send_message"] and not self.settings["message"].strip():
             self.log("message is empty, disabling message sending")
             self.settings["send_message"] = False
 
-        for username in chain(self.settings["banned"], self.config.sections["server"]["banlist"]):
-            user = self.users[username]
-            user.state = UserState.HasPrivateShares
-            user.banned = True
-            user.sent_message = True
-
-            if not self.core.network_filter.is_user_banned(username):
-                self.log(f"{username}: wasn't banned")
-                self.core.network_filter.ban_user(username)
+        return self.settings["send_message"]
 
     @override
     def disable(self):
@@ -127,7 +130,7 @@ class Plugin(BasePlugin):
                 self.log(f"{username}: banned user tried to download: {reason}")
                 self.ban_user(user, username)
         elif user.should_request_shares():
-            if self.settings["verbose"] or reason != CheckReason.DistributedSearch:
+            if user.emit_logs:
                 self.log(f"{username}: requesting user shares: {reason}")
 
             if username not in self.core.userbrowse.users:
@@ -135,8 +138,6 @@ class Plugin(BasePlugin):
 
             self.core.users.watch_user(username, context=self.internal_name)
             self.core.userbrowse.request_user_shares(username)
-        elif self.settings["verbose"] or reason != CheckReason.DistributedSearch:
-            self.log(f"{username}: already requested user shares: {reason}")
 
     def check_shares(self, username):
         browsed_user = self.core.userbrowse.users[username]
@@ -153,28 +154,35 @@ class Plugin(BasePlugin):
             if user.emit_logs:
                 self.log(f"{username}: user doesn't have private shares")
         else:
-            self.log(f"{username}: user has private shares")
+            if user.emit_logs:
+                self.log(f"{username}: user has private shares")
+
             user.state = UserState.HasPrivateShares
             self.ban_user(user, username)
 
+            if self.settings["save_shares"]:
+                obj = {
+                    "username": browsed_user.username,
+                    "num_folders": browsed_user.num_folders,
+                    "num_files": browsed_user.num_files,
+                    "shared_size": browsed_user.shared_size,
+                    "public_folders": browsed_user.public_folders,
+                    "private_folders": browsed_user.private_folders,
+                }
+
+                with (self.shares_path / f"{username}.json").open(mode="wt", encoding="utf-8") as f:
+                    json.dump(obj, f, indent="\t")
+
         self.core.users.unwatch_user(username, context=self.internal_name)
-        self.core.userbrowse.users[username].clear()
+        browsed_user.clear()
 
     def ban_user(self, user, username):
-        if not user.banned:
-            if username not in self.settings["banned"]:
-                self.settings["banned"].append(username)
-
-            if self.core.network_filter.is_user_banned(username):
-                if user.emit_logs:
-                    self.log(f"{username}: user is already banned")
-            else:
-                self.core.network_filter.ban_user(username)
-
-                if user.emit_logs:
-                    self.log(f"{username}: banned user")
-
-            user.banned = True
+        if self.core.network_filter.is_user_banned(username):
+            if user.emit_logs:
+                self.log(f"{username}: user is already banned")
+        else:
+            self.core.network_filter.ban_user(username)
+            self.log(f"{username}: banned user")
 
         aborted_transfers = 0
 
@@ -190,18 +198,12 @@ class Plugin(BasePlugin):
 
             for transfer in transfers:
                 self.core.uploads._abort_transfer(transfer, status=TransferStatus.CANCELLED)
-
                 aborted_transfers += 1
 
         if aborted_transfers != 0:
             self.log(f"{username}: aborted {aborted_transfers} transfers")
 
-        if not user.sent_message and self.settings["send_message"]:
-            if not self.settings["message"].strip():
-                self.log("message is empty, disabling message sending")
-                self.settings["send_message"] = False
-                return
-
+        if not user.sent_message and self.check_message():
             user.sent_message = True
 
             for line in self.settings["message"].splitlines():
@@ -217,7 +219,6 @@ class User:
     def __init__(self):
         self.state = None
         self.requested_shares = None
-        self.banned = False
         self.sent_message = False
         self.emit_logs = False
 
