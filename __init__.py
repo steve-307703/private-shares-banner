@@ -142,6 +142,9 @@ class Plugin(BasePlugin):
             self.core.userbrowse.request_user_shares(username)
 
     def check_shares(self, username):
+        if username not in self.users:
+            return
+
         browsed_user = self.core.userbrowse.users[username]
 
         if browsed_user.num_folders is None or browsed_user.num_files is None:
@@ -181,8 +184,8 @@ class Plugin(BasePlugin):
             with (self.shares_path / f"{username}.json").open(mode="wt", encoding="utf-8") as f:
                 json.dump(obj, f, indent="\t")
 
-        # self.core.users.unwatch_user(username, context=self.internal_name)
-        # browsed_user.clear()
+        self.core.users.unwatch_user(username, context=self.internal_name)
+        browsed_user.clear()
 
     def ban_user(self, user, username):
         if self.core.network_filter.is_user_banned(username):
