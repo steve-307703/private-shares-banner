@@ -68,7 +68,7 @@ class Plugin(BasePlugin):
     @override
     def init(self):
         self.check_message()
-        self.users[self.config.sections["server"]["login"]].state = UserState.NoPrivateShares
+        self.users[self.config.sections["server"]["login"]].state = UserState.Ok
 
         for username in self.config.sections["server"]["banlist"]:
             user = self.users[username]
@@ -123,9 +123,11 @@ class Plugin(BasePlugin):
         if self.settings["verbose"] or reason != CheckReason.DistributedSearch:
             user.emit_logs = True
 
-        if user.state == UserState.NoPrivateShares:
+        if user.state == UserState.Ok:
             pass
-        elif user.state == UserState.HasPrivateShares:
+        elif user.state == UserState.HasPrivateShares or self.core.network_filter.is_user_banned(
+            username
+        ):
             if reason == CheckReason.UploadQueued or reason == CheckReason.UploadStarted:
                 self.log(f"{username}: banned user tried to download: {reason}")
                 self.ban_user(user, username)
@@ -148,33 +150,39 @@ class Plugin(BasePlugin):
 
         user = self.users[username]
 
-        if len(browsed_user.private_folders) == 0:
-            user.state = UserState.NoPrivateShares
-
+        if len(browsed_user.public_folders) < 50 or browsed_user.shared_size < 128 * 1024 * 1024:
             if user.emit_logs:
-                self.log(f"{username}: user doesn't have private shares")
-        else:
+                self.log(f"{username}: user shares only {len(browsed_user.public_folders)} folders")
+
+            user.state = UserState.TooFewPublicShares
+            self.abort_transfers(username)
+        elif len(browsed_user.private_folders) != 0:
             if user.emit_logs:
                 self.log(f"{username}: user has private shares")
 
             user.state = UserState.HasPrivateShares
             self.ban_user(user, username)
+        else:
+            if user.emit_logs:
+                self.log(f"{username}: user doesn't have private shares")
 
-            if self.settings["save_shares"]:
-                obj = {
-                    "username": browsed_user.username,
-                    "num_folders": browsed_user.num_folders,
-                    "num_files": browsed_user.num_files,
-                    "shared_size": browsed_user.shared_size,
-                    "public_folders": browsed_user.public_folders,
-                    "private_folders": browsed_user.private_folders,
-                }
+            user.state = UserState.Ok
 
-                with (self.shares_path / f"{username}.json").open(mode="wt", encoding="utf-8") as f:
-                    json.dump(obj, f, indent="\t")
+        if self.settings["save_shares"]:
+            obj = {
+                "username": browsed_user.username,
+                "num_folders": browsed_user.num_folders,
+                "num_files": browsed_user.num_files,
+                "shared_size": browsed_user.shared_size,
+                "public_folders": browsed_user.public_folders,
+                "private_folders": browsed_user.private_folders,
+            }
 
-        self.core.users.unwatch_user(username, context=self.internal_name)
-        browsed_user.clear()
+            with (self.shares_path / f"{username}.json").open(mode="wt", encoding="utf-8") as f:
+                json.dump(obj, f, indent="\t")
+
+        # self.core.users.unwatch_user(username, context=self.internal_name)
+        # browsed_user.clear()
 
     def ban_user(self, user, username):
         if self.core.network_filter.is_user_banned(username):
@@ -184,6 +192,20 @@ class Plugin(BasePlugin):
             self.core.network_filter.ban_user(username)
             self.log(f"{username}: banned user")
 
+        self.abort_transfers(username)
+
+        if not user.sent_message and self.check_message():
+            user.sent_message = True
+
+            for line in self.settings["message"].splitlines():
+                self.send_private(
+                    username,
+                    line.rstrip(),
+                    show_ui=self.settings["open_private_chat"],
+                    switch_page=False,
+                )
+
+    def abort_transfers(self, username):
         aborted_transfers = 0
 
         for user_transfers in (
@@ -196,23 +218,12 @@ class Plugin(BasePlugin):
             if not transfers:
                 continue
 
-            for transfer in transfers:
+            for transfer in list(transfers.values()):
                 self.core.uploads._abort_transfer(transfer, status=TransferStatus.CANCELLED)
                 aborted_transfers += 1
 
         if aborted_transfers != 0:
             self.log(f"{username}: aborted {aborted_transfers} transfers")
-
-        if not user.sent_message and self.check_message():
-            user.sent_message = True
-
-            for line in self.settings["message"].splitlines():
-                self.send_private(
-                    username,
-                    line.rstrip(),
-                    show_ui=self.settings["open_private_chat"],
-                    switch_page=False,
-                )
 
 
 class User:
@@ -226,7 +237,7 @@ class User:
         now = datetime.now(timezone.utc)
 
         if self.state is None or (
-            self.state == UserState.RequestedShares
+            (self.state == UserState.RequestedShares or self.state == UserState.TooFewPublicShares)
             and (
                 self.requested_shares is None
                 or now - self.requested_shares >= timedelta(seconds=30)
@@ -241,8 +252,9 @@ class User:
 
 class UserState(Enum):
     RequestedShares = 1
-    HasPrivateShares = 2
-    NoPrivateShares = 3
+    Ok = 2
+    HasPrivateShares = 3
+    TooFewPublicShares = 4
 
 
 class CheckReason(Enum):
