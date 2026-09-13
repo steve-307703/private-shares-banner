@@ -143,6 +143,7 @@ class Plugin(BasePlugin):
 
     def check_user(self, username, reason):
         user = self.users[username]
+        user.reason = reason
 
         if self.settings["verbose"] or reason != CheckReason.DistributedSearch:
             user.emit_logs = True
@@ -153,14 +154,14 @@ class Plugin(BasePlugin):
             username
         ):
             if reason == CheckReason.UploadQueued or reason == CheckReason.UploadStarted:
-                self.log(f"{username}: banned user tried to download: {reason}")
+                self.log(f"{username}: banned user tried to download ({reason})")
                 self.ban_user(user, username)
         elif user.should_request_shares():
             if reason == CheckReason.DistributedSearch and not self.distributed_search_rate_limit():
                 return
 
             if user.emit_logs:
-                self.log(f"{username}: requesting user shares: {reason}")
+                self.log(f"{username}: requesting user shares ({reason})")
 
             if username not in self.core.userbrowse.users:
                 self.core.userbrowse.users[username] = BrowsedUser(username)
@@ -175,27 +176,31 @@ class Plugin(BasePlugin):
             return
 
         user.state = None;
-        browsed_user = self.core.userbrowse.users[username]
+        browsed_user = self.core.userbrowse.users.get(username)
+
+        if not browsed_user:
+            self.log(f"{username}: no shares available ({user.reason})")
+            return
 
         if browsed_user.num_folders is None or browsed_user.num_files is None:
-            self.log(f"{username}: shares are None")
+            self.log(f"{username}: shares are None ({user.reason})")
             return
 
         if len(browsed_user.public_folders) < 50 or browsed_user.shared_size < 128 * 1024 * 1024:
             if user.emit_logs:
-                self.log(f"{username}: user shares only {len(browsed_user.public_folders)} folders")
+                self.log(f"{username}: user shares only {len(browsed_user.public_folders)} folders ({user.reason})")
 
             user.state = UserState.TooFewPublicShares
             self.abort_transfers(username)
         elif len(browsed_user.private_folders) != 0:
             if user.emit_logs:
-                self.log(f"{username}: user has private shares")
+                self.log(f"{username}: user has private shares ({user.reason})")
 
             user.state = UserState.HasPrivateShares
             self.ban_user(user, username)
         else:
             if user.emit_logs:
-                self.log(f"{username}: user doesn't have private shares")
+                self.log(f"{username}: user doesn't have private shares ({user.reason})")
 
             user.state = UserState.Ok
 
@@ -218,10 +223,10 @@ class Plugin(BasePlugin):
     def ban_user(self, user, username):
         if self.core.network_filter.is_user_banned(username):
             if user.emit_logs:
-                self.log(f"{username}: user is already banned")
+                self.log(f"{username}: user is already banned ({user.reason})")
         else:
             self.core.network_filter.ban_user(username)
-            self.log(f"{username}: banned user")
+            self.log(f"{username}: banned user ({user.reason})")
 
         self.abort_transfers(username)
 
@@ -254,12 +259,13 @@ class Plugin(BasePlugin):
                 aborted_transfers += 1
 
         if aborted_transfers != 0:
-            self.log(f"{username}: aborted {aborted_transfers} transfers")
+            self.log(f"{username}: aborted {aborted_transfers} transfers ({user.reason})")
 
 
 class User:
     def __init__(self):
         self.state = None
+        self.reason = None
         self.requested_shares = None
         self.sent_message = False
         self.emit_logs = False
