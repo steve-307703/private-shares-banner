@@ -1,4 +1,5 @@
 import json
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -20,6 +21,7 @@ class Plugin(BasePlugin):
             "verbose": False,
             "save_shares": False,
             "check_distributed_search": False,
+            "distributed_search_emission_interval": 1.0,
             "send_message": False,
             "open_private_chat": True,
             "message": (
@@ -41,8 +43,12 @@ class Plugin(BasePlugin):
                 "type": "bool",
             },
             "check_distributed_search": {
-                "description": "Check users from distibuted search events",
+                "description": "Check users from distributed search events",
                 "type": "bool",
+            },
+            "distributed_search_emission_interval": {
+                "description": "Distributed search event check interval in seconds",
+                "type": "float"
             },
             "send_message": {
                 "description": "Send a message after banning",
@@ -64,16 +70,12 @@ class Plugin(BasePlugin):
         self.users = defaultdict(User)
         self.shares_path = Path(log.debug_folder_path).parent / self.internal_name
         self.shares_path.mkdir(exist_ok=True)
+        self.distributed_search_tat = None
 
     @override
     def init(self):
         self.check_message()
         self.users[self.config.sections["server"]["login"]].state = UserState.Ok
-
-        for username in self.config.sections["server"]["banlist"]:
-            user = self.users[username]
-            user.state = UserState.HasPrivateShares
-            user.sent_message = True
 
     def check_message(self):
         if self.settings["send_message"] and not self.settings["message"].strip():
@@ -82,12 +84,34 @@ class Plugin(BasePlugin):
 
         return self.settings["send_message"]
 
+    def distributed_search_rate_limit(self):
+        now = time.monotonic()
+
+        if self.distributed_search_tat is None:
+            tat = now
+        else:
+            tat = self.distributed_search_tat
+
+        if now >= tat:
+            emission_interval = self.settings["distributed_search_emission_interval"]
+
+            if emission_interval <= 0.1:
+                emission_interval = 0.1
+
+            self.distributed_search_tat = max(now, tat) + emission_interval
+            return True
+        else:
+            return False
+
     @override
     def disable(self):
         for username, user in self.users.items():
             if user.state == UserState.RequestedShares:
                 self.core.users.unwatch_user(username, context=self.internal_name)
-                self.core.userbrowse.users[username].clear()
+                user = self.core.userbrowse.users.get(username)
+
+                if user:
+                    user.clear()
 
     @override
     def search_request_notification(self, searchterm, user, token):
@@ -132,6 +156,9 @@ class Plugin(BasePlugin):
                 self.log(f"{username}: banned user tried to download: {reason}")
                 self.ban_user(user, username)
         elif user.should_request_shares():
+            if reason == CheckReason.DistributedSearch and not self.distributed_search_rate_limit():
+                return
+
             if user.emit_logs:
                 self.log(f"{username}: requesting user shares: {reason}")
 
@@ -142,16 +169,17 @@ class Plugin(BasePlugin):
             self.core.userbrowse.request_user_shares(username)
 
     def check_shares(self, username):
-        if username not in self.users:
+        user = self.users[username]
+
+        if user.state != UserState.RequestedShares:
             return
 
+        user.state = None;
         browsed_user = self.core.userbrowse.users[username]
 
         if browsed_user.num_folders is None or browsed_user.num_files is None:
             self.log(f"{username}: shares are None")
             return
-
-        user = self.users[username]
 
         if len(browsed_user.public_folders) < 50 or browsed_user.shared_size < 128 * 1024 * 1024:
             if user.emit_logs:
@@ -243,7 +271,7 @@ class User:
             (self.state == UserState.RequestedShares or self.state == UserState.TooFewPublicShares)
             and (
                 self.requested_shares is None
-                or now - self.requested_shares >= timedelta(seconds=30)
+                or now - self.requested_shares >= timedelta(seconds=60)
             )
         ):
             self.state = UserState.RequestedShares
